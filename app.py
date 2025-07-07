@@ -1,16 +1,18 @@
 from flask import Flask, request, jsonify
 import requests
 import time
+import threading
 
 app = Flask(__name__)
 
 # 🧠 Caches simples (en mémoire)
 user_id_cache = {}
 user_games_cache = {}
-game_passes_cache = {}
+game_passes_cache = {}  # { game_id: { value: [...], timestamp: float } }
 
-# ⏳ Durée max du cache (en secondes)
+# ⏳ Paramètres
 CACHE_TTL = 60  # 1 minute
+MAX_WAIT = 10   # Max 10s d’attente active si données pas prêtes
 
 def is_cache_valid(entry):
     return time.time() - entry["timestamp"] < CACHE_TTL
@@ -34,7 +36,7 @@ def get_user_id(username):
         print("❌ Erreur get_user_id :", e)
         return None
 
-# 🎮 Obtenir la liste des expériences du joueur
+# 🎮 Obtenir les expériences de l’utilisateur
 def get_user_games(user_id):
     if user_id in user_games_cache and is_cache_valid(user_games_cache[user_id]):
         return user_games_cache[user_id]["value"]
@@ -50,10 +52,10 @@ def get_user_games(user_id):
         print("❌ Erreur get_user_games :", e)
         return []
 
-# 🎟️ Obtenir les Game Pass filtrés (avec prix > 0)
-def get_game_passes(game_id):
+# 🎟️ Télécharge et met en cache les Game Pass (thread séparé)
+def fetch_game_passes_async(game_id):
     if game_id in game_passes_cache and is_cache_valid(game_passes_cache[game_id]):
-        return game_passes_cache[game_id]["value"]
+        return
 
     url = f"https://games.roproxy.com/v1/games/{game_id}/game-passes?limit=100"
     try:
@@ -67,10 +69,21 @@ def get_game_passes(game_id):
         ]
         valid_passes.sort(key=lambda x: x["price"])
         game_passes_cache[game_id] = {"value": valid_passes, "timestamp": time.time()}
-        return valid_passes
     except Exception as e:
-        print(f"❌ Erreur get_game_passes pour {game_id} :", e)
-        return []
+        print(f"❌ Erreur fetch_game_passes pour {game_id} :", e)
+
+# 🔁 Attente active jusqu’à ce que les Game Pass soient présents
+def wait_for_game_passes(game_id):
+    if game_id not in game_passes_cache:
+        threading.Thread(target=fetch_game_passes_async, args=(game_id,)).start()
+
+    start = time.time()
+    while time.time() - start < MAX_WAIT:
+        if game_id in game_passes_cache:
+            return game_passes_cache[game_id]["value"]
+        time.sleep(0.2)  # attend 200ms
+
+    return []  # timeout
 
 # 🚀 Route principale de l’API
 @app.route("/api/passes")
@@ -96,7 +109,7 @@ def passes():
             if not game_id or not game_name:
                 continue
 
-            passes = get_game_passes(game_id)
+            passes = wait_for_game_passes(game_id)
             if not passes:
                 continue
 
