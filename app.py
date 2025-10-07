@@ -5,17 +5,14 @@ import threading
 
 app = Flask(__name__)
 
-# 🧠 Caches simples (en mémoire)
-user_id_cache = {}
-user_games_cache = {}
-game_passes_cache = {}  # { game_id: { value: [...], timestamp: float } }
+
 
 # ⏳ Paramètres
-CACHE_TTL = 60  # 1 minute
+CACHE_TTL = 0  # 1 minute
 MAX_WAIT = 10   # Max 10s d’attente active si données pas prêtes
 
 def is_cache_valid(entry):
-    return time.time() - entry["timestamp"] < CACHE_TTL
+    return False
 
 # 🔍 Obtenir l’ID du joueur depuis le username
 def get_user_id(username):
