@@ -9,18 +9,16 @@ CACHE_TTL = 300
 DELAY = 0.4
 
 user_id_cache = {}
-universes_cache = {}
+games_cache = {}
 passes_cache = {}
-
-ROBLOX_API_KEY = os.getenv("ROBLOX_API_KEY")   # 🔥 récupère ta clé Open Cloud
 
 def cache_valid(entry):
     return time.time() - entry["ts"] < CACHE_TTL
 
-def safe_get(url, headers=None, timeout=8):
+def safe_get(url, timeout=8):
     time.sleep(DELAY)
     try:
-        r = requests.get(url, headers=headers, timeout=timeout)
+        r = requests.get(url, timeout=timeout)
         if r.status_code == 429:
             time.sleep(3)
             return None
@@ -52,53 +50,49 @@ def get_user_id(username):
     return None
 
 # -------------------------
-# USERID → UNIVERS (Open Cloud)
+# USERID → LISTE DES PLACES
+# (API officielle, fonctionne 2025)
 # -------------------------
-def get_user_universes(user_id):
-    if user_id in universes_cache and cache_valid(universes_cache[user_id]):
-        return universes_cache[user_id]["val"]
+def get_user_places(user_id):
+    if user_id in games_cache and cache_valid(games_cache[user_id]):
+        return games_cache[user_id]["val"]
 
-    url = f"https://develop.roblox.com/v1/user/{user_id}/universes?isArchived=false"
+    url = f"https://games.roblox.com/v2/users/{user_id}/games?limit=50"
 
-    headers = {
-        "x-api-key": ROBLOX_API_KEY   # 🔥 OBLIGATOIRE !!!
-    }
-
-    r = safe_get(url, headers=headers)
+    r = safe_get(url)
     if not r:
         return []
 
     try:
         data = r.json().get("data", [])
-        universes_cache[user_id] = {"val": data, "ts": time.time()}
+        games_cache[user_id] = {"val": data, "ts": time.time()}
         return data
     except:
         return []
 
 # -------------------------
-# UNIVERSE → GAMEPASSES
+# PLACE → LEGACY GAMEPASSES
 # -------------------------
-def fetch_gamepasses(universe_id):
-    if universe_id in passes_cache and cache_valid(passes_cache[universe_id]):
-        return passes_cache[universe_id]["val"]
+def get_place_passes(place_id):
+    if place_id in passes_cache and cache_valid(passes_cache[place_id]):
+        return passes_cache[place_id]["val"]
 
-    url = f"https://apis.roblox.com/game-passes/v1/universes/{universe_id}/game-passes?passView=Full&pageSize=100"
+    url = f"https://games.roblox.com/v1/games/{place_id}/game-passes?limit=100"
 
-    headers = {
-        "x-api-key": ROBLOX_API_KEY   # 🔥 obligatoire
-    }
-
-    r = safe_get(url, headers=headers)
+    r = safe_get(url)
     if not r:
         return []
 
     try:
-        raw = r.json().get("gamePasses", []) or []
-        valid = [p for p in raw if isinstance(p.get("price"), (int, float)) and p["price"] > 0]
+        raw = r.json().get("data", [])
+        valid = [p for p in raw if p.get("price", 0) > 0]
         valid.sort(key=lambda x: x["price"])
-        passes_cache[universe_id] = {"val": valid, "ts": time.time()}
+
+        passes_cache[place_id] = {"val": valid, "ts": time.time()}
         return valid
-    except:
+
+    except Exception as e:
+        print("❌ ERROR parsing passes:", e)
         return []
 
 # -------------------------
@@ -123,21 +117,21 @@ def api_passes():
     if not user_id:
         return jsonify({"error": "User not found"}), 404
 
-    universes = get_user_universes(user_id)
-    if not universes:
+    places = get_user_places(user_id)
+    if not places:
         return jsonify([])
 
     results = []
 
-    for uni in universes:
-        universe_id = uni.get("id")
-        game_name = uni.get("name", "Unknown")
-        place_id = uni.get("rootPlaceId")
+    # On récupère TOUS les places
+    for game in places:
+        place_id = game.get("rootPlace", {}).get("id")
+        game_name = game.get("name")
 
-        if not universe_id:
+        if not place_id:
             continue
 
-        passes = fetch_gamepasses(universe_id)
+        passes = get_place_passes(place_id)
         if not passes:
             continue
 
@@ -151,7 +145,7 @@ def api_passes():
 
 @app.route("/")
 def home():
-    return "<h1>🚀 Roblox Passes API — Fly.io (Hazem-style)</h1>"
+    return "<h1>🔥 Roblox Passes API — Legacy Passes Supported</h1>"
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
