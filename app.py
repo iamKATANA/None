@@ -1,180 +1,148 @@
 from flask import Flask, request, jsonify
 import requests
 import time
-import threading
-import random
+import os
 
 app = Flask(__name__)
 
-# 🧠 Caches (en mémoire)
+CACHE_TTL = 300
+DELAY = 0.4
+
 user_id_cache = {}
-user_games_cache = {}
-game_passes_cache = {}
+universes_cache = {}
+passes_cache = {}
 
-# ⚙️ Paramètres
-CACHE_TTL = 300  # 5 minutes
-MAX_WAIT = 10
-DELAY_BETWEEN_REQUESTS = 0.5
+def cache_valid(entry):
+    return time.time() - entry["ts"] < CACHE_TTL
 
-# 🌐 Domaines alternatifs roproxy
-ROPROXY_DOMAINS = [
-    "https://users.roproxy.com",
-    "https://users.api.roproxy.com",
-    "https://users.rprxy.xyz"
-]
-GAMES_DOMAINS = [
-    "https://games.roproxy.com",
-    "https://games.api.roproxy.com",
-    "https://games.rprxy.xyz"
-]
-
-# 🔍 Vérifie si un cache est encore valide
-def is_cache_valid(entry):
-    return time.time() - entry["timestamp"] < CACHE_TTL
-
-# 🔒 Fonction de requête sûre (anti-429)
-def safe_request(url, method="get", payload=None, timeout=6):
-    time.sleep(DELAY_BETWEEN_REQUESTS)
+def safe_get(url, timeout=8):
+    time.sleep(DELAY)
     try:
-        if method == "get":
-            response = requests.get(url, timeout=timeout)
-        else:
-            response = requests.post(url, json=payload, timeout=timeout)
-
-        if response.status_code == 429:
-            print(f"⚠️ Trop de requêtes (429) pour {url} — pause 5s...")
-            time.sleep(5)
+        r = requests.get(url, timeout=timeout)
+        if r.status_code == 429:
+            time.sleep(3)
             return None
-
-        response.raise_for_status()
-        return response
+        r.raise_for_status()
+        return r
     except Exception as e:
-        print(f"❌ Erreur requête : {url} — {e}")
+        print("❌ HTTP ERROR:", url, e)
         return None
 
-# 🔹 Obtenir user_id à partir du username
+# -------------------------
+# USERNAME → USERID
+# -------------------------
 def get_user_id(username):
-    if username in user_id_cache and is_cache_valid(user_id_cache[username]):
-        return user_id_cache[username]["value"]
+    if username in user_id_cache and cache_valid(user_id_cache[username]):
+        return user_id_cache[username]["val"]
 
-    base = random.choice(ROPROXY_DOMAINS)
-    url = f"{base}/v1/usernames/users"
+    url = "https://users.roblox.com/v1/usernames/users"
     payload = {"usernames": [username]}
 
-    response = safe_request(url, "post", payload)
-    if not response:
-        return None
-
     try:
-        data = response.json()
-        user_id = data["data"][0]["id"] if data.get("data") else None
-        if user_id:
-            user_id_cache[username] = {"value": user_id, "timestamp": time.time()}
-        else:
-            print(f"⚠️ Aucun user_id trouvé pour {username}")
-        return user_id
-    except Exception as e:
-        print(f"❌ Erreur parsing get_user_id pour {username} :", e)
+        r = requests.post(url, json=payload, timeout=6)
+        data = r.json()
+        if data.get("data"):
+            uid = data["data"][0]["id"]
+            user_id_cache[username] = {"val": uid, "ts": time.time()}
+            return uid
+    except:
         return None
+    return None
 
-# 🎮 Obtenir les jeux de l'utilisateur
-def get_user_games(user_id):
-    if user_id in user_games_cache and is_cache_valid(user_games_cache[user_id]):
-        return user_games_cache[user_id]["value"]
+# -------------------------
+# USERID → LISTE DES UNIVERS
+# 100x plus fiable que games.roblox.com
+# -------------------------
+def get_user_universes(user_id):
+    if user_id in universes_cache and cache_valid(universes_cache[user_id]):
+        return universes_cache[user_id]["val"]
 
-    base = random.choice(GAMES_DOMAINS)
-    url = f"{base}/v2/users/{user_id}/games?accessFilter=2&limit=10&sortOrder=Asc"
+    url = f"https://develop.roblox.com/v1/user/{user_id}/universes?isArchived=false"
 
-    response = safe_request(url)
-    if not response:
+    r = safe_get(url)
+    if not r:
         return []
 
     try:
-        data = response.json().get("data", [])
-        user_games_cache[user_id] = {"value": data, "timestamp": time.time()}
+        data = r.json().get("data", [])
+        universes_cache[user_id] = {"val": data, "ts": time.time()}
         return data
-    except Exception as e:
-        print(f"❌ Erreur parsing get_user_games pour {user_id} :", e)
+    except:
         return []
 
-# 🎟️ Télécharger les passes d’un jeu
-def fetch_game_passes(game_id):
-    if game_id in game_passes_cache and is_cache_valid(game_passes_cache[game_id]):
-        return game_passes_cache[game_id]["value"]
+# -------------------------
+# UNIVERSE → GAMEPASSES
+# -------------------------
+def fetch_gamepasses(universe_id):
+    if universe_id in passes_cache and cache_valid(passes_cache[universe_id]):
+        return passes_cache[universe_id]["val"]
 
-    base = random.choice(GAMES_DOMAINS)
-    url = f"{base}/v1/games/{game_id}/game-passes?limit=100"
+    url = f"https://apis.roblox.com/game-passes/v1/universes/{universe_id}/game-passes?passView=Full&pageSize=100"
 
-    response = safe_request(url)
-    if not response:
+    r = safe_get(url)
+    if not r:
         return []
 
     try:
-        passes = response.json().get("data", [])
-        valid_passes = [
-            p for p in passes
-            if isinstance(p.get("price"), (int, float)) and p["price"] > 0
-        ]
-        valid_passes.sort(key=lambda x: x["price"])
-        game_passes_cache[game_id] = {"value": valid_passes, "timestamp": time.time()}
-        print(f"✅ {len(valid_passes)} passes récupérés pour jeu {game_id}")
-        return valid_passes
-    except Exception as e:
-        print(f"❌ Erreur parsing fetch_game_passes pour {game_id} :", e)
+        raw = r.json().get("gamePasses", []) or []
+        valid = [p for p in raw if isinstance(p.get("price"), (int, float)) and p["price"] > 0]
+        valid.sort(key=lambda x: x["price"])
+        passes_cache[universe_id] = {"val": valid, "ts": time.time()}
+        return valid
+    except:
         return []
 
-# 🚀 Route principale
+# -------------------------
+# ENDPOINT PRINCIPAL
+# -------------------------
 @app.route("/api/passes")
-def passes():
+def api_passes():
     username = request.args.get("username")
     userid = request.args.get("userid")
-    force = request.args.get("force", "false").lower() == "true"
 
     if not username and not userid:
         return jsonify({"error": "Missing username or userid"}), 400
 
-    try:
-        # Récupération ID utilisateur
-        if userid:
+    if userid:
+        try:
             user_id = int(userid)
-        else:
-            user_id = get_user_id(username)
-            if not user_id:
-                return jsonify({"error": "User not found"}), 404
+        except:
+            user_id = None
+    else:
+        user_id = get_user_id(username)
 
-        games = get_user_games(user_id)
-        if not games:
-            return jsonify([])
+    if not user_id:
+        return jsonify({"error": "User not found"}), 404
 
-        result = []
+    universes = get_user_universes(user_id)
+    if not universes:
+        return jsonify([])
 
-        # ⚡ Ne prend que le premier jeu (évite 429)
-        for game in games[:1]:
-            game_id = game.get("id")
-            game_name = game.get("name")
-            if not game_id or not game_name:
-                continue
+    results = []
 
-            passes_data = fetch_game_passes(game_id)
-            if not passes_data:
-                continue
+    for uni in universes:
+        universe_id = uni.get("id")
+        game_name = uni.get("name", "Unknown")
+        place_id = uni.get("rootPlaceId")
 
-            result.append({
-                "experienceName": game_name,
-                "gameId": game_id,
-                "passes": passes_data
-            })
+        if not universe_id:
+            continue
 
-        return jsonify(result)
-    except Exception as e:
-        print("❌ Erreur globale :", e)
-        return jsonify({"error": "Internal server error"}), 500
+        passes = fetch_gamepasses(universe_id)
+        if not passes:
+            continue
 
-# 🌍 Page d’accueil
+        results.append({
+            "experienceName": game_name,
+            "gameId": place_id,
+            "passes": passes
+        })
+
+    return jsonify(results)
+
 @app.route("/")
-def index():
-    return "<h3>🚀 Flask API active — passes Roblox</h3>"
+def home():
+    return "<h1>🚀 Roblox Passes API — Fly.io (Hazem-style)</h1>"
 
-# 🏁 Lancement sur Railway
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
