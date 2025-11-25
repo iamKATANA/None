@@ -51,7 +51,6 @@ def get_user_id(username):
 
 # -------------------------
 # USERID → LISTE DES PLACES
-# (API officielle, fonctionne 2025)
 # -------------------------
 def get_user_places(user_id):
     if user_id in games_cache and cache_valid(games_cache[user_id]):
@@ -71,7 +70,7 @@ def get_user_places(user_id):
         return []
 
 # -------------------------
-# PLACE → LEGACY GAMEPASSES
+# PLACE → GAMEPASSES (legacy)
 # -------------------------
 def get_place_passes(place_id):
     if place_id in passes_cache and cache_valid(passes_cache[place_id]):
@@ -123,7 +122,6 @@ def api_passes():
 
     results = []
 
-    # On récupère TOUS les places
     for game in places:
         place_id = game.get("rootPlace", {}).get("id")
         game_name = game.get("name")
