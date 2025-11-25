@@ -12,13 +12,15 @@ user_id_cache = {}
 universes_cache = {}
 passes_cache = {}
 
+ROBLOX_API_KEY = os.getenv("ROBLOX_API_KEY")   # 🔥 récupère ta clé Open Cloud
+
 def cache_valid(entry):
     return time.time() - entry["ts"] < CACHE_TTL
 
-def safe_get(url, timeout=8):
+def safe_get(url, headers=None, timeout=8):
     time.sleep(DELAY)
     try:
-        r = requests.get(url, timeout=timeout)
+        r = requests.get(url, headers=headers, timeout=timeout)
         if r.status_code == 429:
             time.sleep(3)
             return None
@@ -50,8 +52,7 @@ def get_user_id(username):
     return None
 
 # -------------------------
-# USERID → LISTE DES UNIVERS
-# 100x plus fiable que games.roblox.com
+# USERID → UNIVERS (Open Cloud)
 # -------------------------
 def get_user_universes(user_id):
     if user_id in universes_cache and cache_valid(universes_cache[user_id]):
@@ -59,7 +60,11 @@ def get_user_universes(user_id):
 
     url = f"https://develop.roblox.com/v1/user/{user_id}/universes?isArchived=false"
 
-    r = safe_get(url)
+    headers = {
+        "x-api-key": ROBLOX_API_KEY   # 🔥 OBLIGATOIRE !!!
+    }
+
+    r = safe_get(url, headers=headers)
     if not r:
         return []
 
@@ -79,7 +84,11 @@ def fetch_gamepasses(universe_id):
 
     url = f"https://apis.roblox.com/game-passes/v1/universes/{universe_id}/game-passes?passView=Full&pageSize=100"
 
-    r = safe_get(url)
+    headers = {
+        "x-api-key": ROBLOX_API_KEY   # 🔥 obligatoire
+    }
+
+    r = safe_get(url, headers=headers)
     if not r:
         return []
 
