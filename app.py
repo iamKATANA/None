@@ -1,138 +1,118 @@
-from flask import Flask, request, jsonify
+from flask import Flask, jsonify
 import requests
+from bs4 import BeautifulSoup
 import time
-import random
 
 app = Flask(__name__)
 
-ROPROXY = [
-    "https://games.roproxy.com",
-    "https://games.api.roproxy.com",
-    "https://games.rprxy.xyz"
-]
+# ─────────── APIs Roblox ───────────
+USER_GAMES_API = "https://games.roblox.com/v2/users/{}/games?limit=50"
+UNIVERSE_API = "https://apis.roblox.com/universes/v1/places/{}/universe"
+GAMEPASSES_API = "https://apis.roblox.com/game-passes/v1/universes/{}/game-passes?limit=100&sortOrder=Asc"
 
-USERS_ROPROXY = [
-    "https://users.roproxy.com",
-    "https://users.api.roproxy.com",
-    "https://users.rprxy.xyz"
-]
+# ─────────── Cache des prix ───────────
+CACHE = {}   # { gamepassId: { price: int, lastUpdate: timestamp } }
+TTL = 600    # 10 minutes (évite rate-limit)
 
-CACHE_TTL = 300
-user_cache = {}
-games_cache = {}
-passes_cache = {}
+HEADERS = {
+    "User-Agent": "Mozilla/5.0",
+    "Referer": "https://www.roblox.com/"
+}
 
-def safe_get(url):
-    time.sleep(0.3)
+def scrape_price(gamepass_id):
+    print(f"[SCRAPE] Price for GamePass {gamepass_id}")
+
+    url = f"https://www.roblox.com/game-pass/{gamepass_id}"
+    r = requests.get(url, headers=HEADERS)
+
+    if r.status_code != 200:
+        return None
+
+    soup = BeautifulSoup(r.text, "html.parser")
+    price_tag = soup.select_one(".text-robux-lg")
+
+    if not price_tag:
+        return None
+
+    return int(price_tag.text.strip().replace(",", ""))
+
+def get_price(gamepass_id):
+    now = time.time()
+
+    if gamepass_id in CACHE:
+        if now - CACHE[gamepass_id]["lastUpdate"] < TTL:
+            return CACHE[gamepass_id]["price"]
+
+    price = scrape_price(gamepass_id)
+
+    if price is not None:
+        CACHE[gamepass_id] = {
+            "price": price,
+            "lastUpdate": now
+        }
+
+    return price
+
+@app.route("/user/<int:user_id>/gamepasses")
+def get_user_gamepasses(user_id):
     try:
-        r = requests.get(url, timeout=8)
-        if r.status_code == 429:
-            time.sleep(2)
-            return None
-        r.raise_for_status()
-        return r
-    except:
-        return None
+        games_resp = requests.get(USER_GAMES_API.format(user_id))
+        if games_resp.status_code != 200:
+            return jsonify({"error": "Games API error", "details": games_resp.text}), games_resp.status_code
 
-def get_user_id(username):
-    if username in user_cache and time.time() - user_cache[username]["t"] < CACHE_TTL:
-        return user_cache[username]["id"]
+        games_data = games_resp.json().get("data", [])
 
-    base = random.choice(USERS_ROPROXY)
-    url = f"{base}/v1/usernames/users"
-    r = requests.post(url, json={"usernames":[username]})
+        place_ids = [
+            game.get("rootPlace", {}).get("id")
+            for game in games_data if "rootPlace" in game
+        ]
 
-    if not r:
-        return None
+        place_ids = [pid for pid in place_ids if pid]
 
-    data = r.json().get("data")
-    if not data:
-        return None
+        if not place_ids:
+            return jsonify({"gamepasses": [], "error": "No places found"}), 200
 
-    user_id = data[0]["id"]
-    user_cache[username] = {"id": user_id, "t": time.time()}
-    return user_id
+        universe_ids = set()
+        for pid in place_ids:
+            uni_resp = requests.get(UNIVERSE_API.format(pid))
+            if uni_resp.status_code == 200:
+                uid = uni_resp.json().get("universeId")
+                if uid:
+                    universe_ids.add(uid)
 
-def get_user_games(user_id):
-    if user_id in games_cache and time.time() - games_cache[user_id]["t"] < CACHE_TTL:
-        return games_cache[user_id]["games"]
+        if not universe_ids:
+            return jsonify({"gamepasses": [], "error": "No universes found"}), 200
 
-    base = random.choice(ROPROXY)
-    url = f"{base}/v2/users/{user_id}/games?accessFilter=2&limit=10&sortOrder=Asc"
+        all_passes = []
+        for uid in universe_ids:
+            gp_resp = requests.get(GAMEPASSES_API.format(uid))
+            if gp_resp.status_code == 200:
+                all_passes.extend(gp_resp.json().get("gamePasses", []))
 
-    r = safe_get(url)
-    if not r:
-        return []
+        passes = {p["id"]: p for p in all_passes}.values()
 
-    games = r.json().get("data", [])
-    games_cache[user_id] = {"games": games, "t": time.time()}
-    return games
+        result = []
+        for gp in passes:
+            gp_id = gp["id"]
+            price = get_price(gp_id)
 
-def get_game_passes(game_id):
-    if game_id in passes_cache and time.time() - passes_cache[game_id]["t"] < CACHE_TTL:
-        return passes_cache[game_id]["passes"]
-
-    base = random.choice(ROPROXY)
-    url = f"{base}/v1/games/{game_id}/game-passes?limit=100"
-    r = safe_get(url)
-
-    if not r:
-        return []
-
-    items = r.json().get("data", [])
-    valid = []
-
-    for p in items:
-        if isinstance(p.get("price"), (int, float)) and p["price"] > 0:
-            valid.append({
-                "id": p["id"],
-                "price": p["price"],
-                "name": p.get("name")
-            })
-
-    valid.sort(key=lambda x: x["price"])
-    passes_cache[game_id] = {"passes": valid, "t": time.time()}
-    return valid
-
-@app.route("/api/passes")
-def api():
-    username = request.args.get("username")
-    userid = request.args.get("userid")
-
-    if not username and not userid:
-        return jsonify([])
-
-    if userid:
-        try:
-            user_id = int(userid)
-        except:
-            return jsonify([])
-    else:
-        user_id = get_user_id(username)
-
-    if not user_id:
-        return jsonify([])
-
-    games = get_user_games(user_id)
-    if not games:
-        return jsonify([])
-
-    result = []
-
-    for g in games[:1]:  # éviter 429
-        passes = get_game_passes(g["id"])
-        if passes:
             result.append({
-                "experienceName": g["name"],
-                "gameId": g["id"],
-                "passes": passes
+                "id": gp_id,
+                "name": gp.get("name"),
+                "productId": gp.get("productId"),
+                "price": price
             })
 
-    return jsonify(result)
+        return jsonify({
+            "userId": user_id,
+            "places": place_ids,
+            "universes": list(universe_ids),
+            "gamepasses": result
+        })
 
-@app.route("/")
-def home():
-    return "Roblox Passes API Online"
+    except Exception as e:
+        return jsonify({"error": "Internal server error", "details": str(e)}), 500
+
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
+    app.run(debug=True)
