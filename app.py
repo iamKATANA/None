@@ -1,149 +1,138 @@
 from flask import Flask, request, jsonify
 import requests
 import time
-import os
+import random
 
 app = Flask(__name__)
 
-CACHE_TTL = 300
-DELAY = 0.4
+ROPROXY = [
+    "https://games.roproxy.com",
+    "https://games.api.roproxy.com",
+    "https://games.rprxy.xyz"
+]
 
-user_id_cache = {}
+USERS_ROPROXY = [
+    "https://users.roproxy.com",
+    "https://users.api.roproxy.com",
+    "https://users.rprxy.xyz"
+]
+
+CACHE_TTL = 300
+user_cache = {}
 games_cache = {}
 passes_cache = {}
 
-def cache_valid(entry):
-    return time.time() - entry["ts"] < CACHE_TTL
-
-def safe_get(url, timeout=8):
-    time.sleep(DELAY)
+def safe_get(url):
+    time.sleep(0.3)
     try:
-        r = requests.get(url, timeout=timeout)
+        r = requests.get(url, timeout=8)
         if r.status_code == 429:
-            time.sleep(3)
+            time.sleep(2)
             return None
         r.raise_for_status()
         return r
-    except Exception as e:
-        print("❌ HTTP ERROR:", url, e)
+    except:
         return None
 
-# -------------------------
-# USERNAME → USERID
-# -------------------------
 def get_user_id(username):
-    if username in user_id_cache and cache_valid(user_id_cache[username]):
-        return user_id_cache[username]["val"]
+    if username in user_cache and time.time() - user_cache[username]["t"] < CACHE_TTL:
+        return user_cache[username]["id"]
 
-    url = "https://users.roblox.com/v1/usernames/users"
-    payload = {"usernames": [username]}
+    base = random.choice(USERS_ROPROXY)
+    url = f"{base}/v1/usernames/users"
+    r = requests.post(url, json={"usernames":[username]})
 
-    try:
-        r = requests.post(url, json=payload, timeout=6)
-        data = r.json()
-        if data.get("data"):
-            uid = data["data"][0]["id"]
-            user_id_cache[username] = {"val": uid, "ts": time.time()}
-            return uid
-    except:
+    if not r:
         return None
-    return None
 
-# -------------------------
-# USERID → LISTE DES PLACES
-# -------------------------
-def get_user_places(user_id):
-    if user_id in games_cache and cache_valid(games_cache[user_id]):
-        return games_cache[user_id]["val"]
+    data = r.json().get("data")
+    if not data:
+        return None
 
-    url = f"https://games.roblox.com/v2/users/{user_id}/games?limit=50"
+    user_id = data[0]["id"]
+    user_cache[username] = {"id": user_id, "t": time.time()}
+    return user_id
 
-    r = safe_get(url)
-    if not r:
-        return []
+def get_user_games(user_id):
+    if user_id in games_cache and time.time() - games_cache[user_id]["t"] < CACHE_TTL:
+        return games_cache[user_id]["games"]
 
-    try:
-        data = r.json().get("data", [])
-        games_cache[user_id] = {"val": data, "ts": time.time()}
-        return data
-    except:
-        return []
-
-# -------------------------
-# PLACE → GAMEPASSES (legacy)
-# -------------------------
-def get_place_passes(place_id):
-    if place_id in passes_cache and cache_valid(passes_cache[place_id]):
-        return passes_cache[place_id]["val"]
-
-    url = f"https://games.roblox.com/v1/games/{place_id}/game-passes?limit=100"
+    base = random.choice(ROPROXY)
+    url = f"{base}/v2/users/{user_id}/games?accessFilter=2&limit=10&sortOrder=Asc"
 
     r = safe_get(url)
     if not r:
         return []
 
-    try:
-        raw = r.json().get("data", [])
-        valid = [p for p in raw if p.get("price", 0) > 0]
-        valid.sort(key=lambda x: x["price"])
+    games = r.json().get("data", [])
+    games_cache[user_id] = {"games": games, "t": time.time()}
+    return games
 
-        passes_cache[place_id] = {"val": valid, "ts": time.time()}
-        return valid
+def get_game_passes(game_id):
+    if game_id in passes_cache and time.time() - passes_cache[game_id]["t"] < CACHE_TTL:
+        return passes_cache[game_id]["passes"]
 
-    except Exception as e:
-        print("❌ ERROR parsing passes:", e)
+    base = random.choice(ROPROXY)
+    url = f"{base}/v1/games/{game_id}/game-passes?limit=100"
+    r = safe_get(url)
+
+    if not r:
         return []
 
-# -------------------------
-# ENDPOINT PRINCIPAL
-# -------------------------
+    items = r.json().get("data", [])
+    valid = []
+
+    for p in items:
+        if isinstance(p.get("price"), (int, float)) and p["price"] > 0:
+            valid.append({
+                "id": p["id"],
+                "price": p["price"],
+                "name": p.get("name")
+            })
+
+    valid.sort(key=lambda x: x["price"])
+    passes_cache[game_id] = {"passes": valid, "t": time.time()}
+    return valid
+
 @app.route("/api/passes")
-def api_passes():
+def api():
     username = request.args.get("username")
     userid = request.args.get("userid")
 
     if not username and not userid:
-        return jsonify({"error": "Missing username or userid"}), 400
+        return jsonify([])
 
     if userid:
         try:
             user_id = int(userid)
         except:
-            user_id = None
+            return jsonify([])
     else:
         user_id = get_user_id(username)
 
     if not user_id:
-        return jsonify({"error": "User not found"}), 404
-
-    places = get_user_places(user_id)
-    if not places:
         return jsonify([])
 
-    results = []
+    games = get_user_games(user_id)
+    if not games:
+        return jsonify([])
 
-    for game in places:
-        place_id = game.get("rootPlace", {}).get("id")
-        game_name = game.get("name")
+    result = []
 
-        if not place_id:
-            continue
+    for g in games[:1]:  # éviter 429
+        passes = get_game_passes(g["id"])
+        if passes:
+            result.append({
+                "experienceName": g["name"],
+                "gameId": g["id"],
+                "passes": passes
+            })
 
-        passes = get_place_passes(place_id)
-        if not passes:
-            continue
-
-        results.append({
-            "experienceName": game_name,
-            "gameId": place_id,
-            "passes": passes
-        })
-
-    return jsonify(results)
+    return jsonify(result)
 
 @app.route("/")
 def home():
-    return "<h1>🔥 Roblox Passes API — Legacy Passes Supported</h1>"
+    return "Roblox Passes API Online"
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+    app.run(host="0.0.0.0", port=8080)
